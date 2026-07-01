@@ -1,5 +1,18 @@
+# HENU-Autologin
 
+河南大学校园网/运营商 portal 自动认证脚本，适用于路由器等设备通过校园网认证链路自动登录。
 
+## 适用边界
+
+本项目只处理校园网认证相关接口，例如：
+
+- `http://172.29.35.27:8088/aaa-auth/api/v1/auth`
+- `http://172.29.35.27:8882/user/check-only`
+- `http://172.29.35.36:6060/quickauth.do`
+
+本项目不处理图书馆预约系统的 CAS ticket、CASTGC、图书馆 token 或 `/v4/*` 预约接口。图书馆预约需单独适配 `ids.henu.edu.cn` 到 `zwyy.henu.edu.cn` 的 CAS 登录链路。
+
+## 使用方法
 
 修改下面的username，password后，在路由器的ssh运行
 ```bash
