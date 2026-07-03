@@ -101,12 +101,28 @@ wait_for_route() {
     return 1
 }
 
-http_code() {
+http_status() {
     url="$1"
-    curl -L -sS --connect-timeout 5 --max-time 10 \
-        -o "/tmp/campus_http_check.$$" \
-        -w '%{http_code}' "$url" 2>/dev/null || true
-    rm -f "/tmp/campus_http_check.$$"
+    out="$2"
+    headers="/tmp/campus_http_headers.$$"
+    rm -f "$out" "$headers"
+    wget -S -T 10 -O "$out" "$url" 2>"$headers" || true
+    awk '/^[[:space:]]*HTTP\// { code=$2 } END { print code }' "$headers"
+    rm -f "$headers"
+}
+
+http_get_body() {
+    wget -q -T 15 -O - "$1" 2>/dev/null || true
+}
+
+http_post_form() {
+    url="$1"
+    data="$2"
+    wget -q -T 15 -O - \
+        --header="Content-Type: application/x-www-form-urlencoded" \
+        --header="Referer: http://172.29.35.36:6060/" \
+        --post-data="$data" \
+        "$url" 2>/dev/null || true
 }
 
 check_network() {
@@ -114,13 +130,12 @@ check_network() {
         "http://connectivitycheck.gstatic.com/generate_204" \
         "http://www.gstatic.com/generate_204"
     do
-        code="$(http_code "$url")"
+        code="$(http_status "$url" "/tmp/campus_http_check.$$")"
+        rm -f "/tmp/campus_http_check.$$"
         [ "$code" = "204" ] && return 0
     done
 
-    code="$(curl -k -L -sS --connect-timeout 5 --max-time 10 \
-        -o "/tmp/campus_baidu_check.$$" \
-        -w '%{http_code}' https://www.baidu.com/ 2>/dev/null || true)"
+    code="$(http_status "http://www.baidu.com/" "/tmp/campus_baidu_check.$$")"
     if [ "$code" = "200" ] &&
         grep -qi 'STATUS OK\|baidu\|百度' "/tmp/campus_baidu_check.$$" 2>/dev/null; then
         rm -f "/tmp/campus_baidu_check.$$"
@@ -132,29 +147,20 @@ check_network() {
 
 first_auth() {
     log "first auth"
-    RESPONSE1="$(curl -sS -X POST \
+    data="campusCode=${CAMPUS_CODE}&username=${USERNAME}&password=${PASSWORD}&operatorSuffix=${OPERATOR_SUFFIX}"
+    RESPONSE1="$(http_post_form \
         "http://172.29.35.27:8088/aaa-auth/api/v1/auth" \
-        -H "Content-Type: application/x-www-form-urlencoded" \
-        -H "Referer: http://172.29.35.36:6060/" \
-        --connect-timeout 8 --max-time 15 \
-        --data-urlencode "campusCode=${CAMPUS_CODE}" \
-        --data-urlencode "username=${USERNAME}" \
-        --data-urlencode "password=${PASSWORD}" \
-        --data-urlencode "operatorSuffix=${OPERATOR_SUFFIX}" 2>/dev/null || true)"
+        "$data")"
     log "first auth response: $RESPONSE1"
     echo "$RESPONSE1" | grep -q '"code":1'
 }
 
 second_auth() {
     log "second auth"
-    RESPONSE2="$(curl -sS -X POST \
+    data="username=${USERNAME}&password=${PASSWORD}&operatorSuffix=${OPERATOR_SUFFIX}"
+    RESPONSE2="$(http_post_form \
         "http://172.29.35.27:8882/user/check-only" \
-        -H "Content-Type: application/x-www-form-urlencoded" \
-        -H "Referer: http://172.29.35.36:6060/" \
-        --connect-timeout 8 --max-time 15 \
-        --data-urlencode "username=${USERNAME}" \
-        --data-urlencode "password=${PASSWORD}" \
-        --data-urlencode "operatorSuffix=${OPERATOR_SUFFIX}" 2>/dev/null || true)"
+        "$data")"
     log "second auth response: $RESPONSE2"
     echo "$RESPONSE2" | grep -q '"code":1'
 }
@@ -163,20 +169,11 @@ portal_auth() {
     WAN_IP="$(get_wan_ip)"
     TIMESTAMP="$(($(date +%s) * 1000))"
     UUID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "$TIMESTAMP")"
+    ENCODED_SUFFIX="$(printf "%s" "$OPERATOR_SUFFIX" | sed 's/@/%40/g')"
 
     log "portal auth: ip=$WAN_IP ts=$TIMESTAMP uuid=$UUID"
-    RESPONSE3="$(curl -sS -G \
-        "http://172.29.35.36:6060/quickauth.do" \
-        -H "Referer: http://172.29.35.36:6060/" \
-        -b "macAuth=; ABMS=362ee66b-fa1f-4ef9-a651-bfd9d61d194a" \
-        --connect-timeout 8 --max-time 15 \
-        --data-urlencode "userid=${USERNAME}${OPERATOR_SUFFIX}" \
-        --data-urlencode "passwd=${PASSWORD}" \
-        --data-urlencode "wlanuserip=${WAN_IP}" \
-        --data-urlencode "wlanacname=HD-SuShe-ME60" \
-        --data-urlencode "wlanacIp=172.22.254.253" \
-        --data-urlencode "timestamp=${TIMESTAMP}" \
-        --data-urlencode "uuid=${UUID}" 2>/dev/null || true)"
+    RESPONSE3="$(http_get_body \
+        "http://172.29.35.36:6060/quickauth.do?userid=${USERNAME}${ENCODED_SUFFIX}&passwd=${PASSWORD}&wlanuserip=${WAN_IP}&wlanacname=HD-SuShe-ME60&wlanacIp=172.22.254.253&timestamp=${TIMESTAMP}&uuid=${UUID}")"
     log "portal auth response: $RESPONSE3"
     echo "$RESPONSE3" | grep -Eq '"message":"认证成功"|认证成功|已经认证|已在线'
 }
