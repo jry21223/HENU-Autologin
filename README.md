@@ -102,9 +102,17 @@ log() {
 }
 
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    log "skip: another auto-login process is running (${1:-manual})"
-    exit 0
+    if [ -f "$LOCK_DIR/pid" ] && kill -0 "$(cat "$LOCK_DIR/pid" 2>/dev/null)" 2>/dev/null; then
+        log "skip: another auto-login process is running (${1:-manual})"
+        exit 0
+    fi
+    rm -rf "$LOCK_DIR"
+    mkdir "$LOCK_DIR" 2>/dev/null || {
+        log "skip: cannot create lock (${1:-manual})"
+        exit 0
+    }
 fi
+echo "$$" > "$LOCK_DIR/pid"
 trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
 
 get_wan_ip() {
@@ -126,14 +134,12 @@ wait_for_route() {
     return 1
 }
 
-http_status() {
+http_empty_body() {
     url="$1"
     out="$2"
-    headers="/tmp/campus_http_headers.$$"
-    rm -f "$out" "$headers"
-    wget -S -T 10 -O "$out" "$url" 2>"$headers" || true
-    awk '/^[[:space:]]*HTTP\// { code=$2 } END { print code }' "$headers"
-    rm -f "$headers"
+    rm -f "$out"
+    wget -q -T 10 -O "$out" "$url" 2>/dev/null || return 1
+    [ "$(wc -c < "$out" 2>/dev/null || echo 1)" = "0" ]
 }
 
 http_get_body() {
@@ -155,14 +161,15 @@ check_network() {
         "http://connectivitycheck.gstatic.com/generate_204" \
         "http://www.gstatic.com/generate_204"
     do
-        code="$(http_status "$url" "/tmp/campus_http_check.$$")"
+        if http_empty_body "$url" "/tmp/campus_http_check.$$"; then
+            rm -f "/tmp/campus_http_check.$$"
+            return 0
+        fi
         rm -f "/tmp/campus_http_check.$$"
-        [ "$code" = "204" ] && return 0
     done
 
-    code="$(http_status "http://www.baidu.com/" "/tmp/campus_baidu_check.$$")"
-    if [ "$code" = "200" ] &&
-        grep -qi 'STATUS OK\|baidu\|百度' "/tmp/campus_baidu_check.$$" 2>/dev/null; then
+    wget -q -T 10 -O "/tmp/campus_baidu_check.$$" "http://www.baidu.com/" 2>/dev/null || true
+    if grep -qi 'STATUS OK\|baidu\|百度' "/tmp/campus_baidu_check.$$" 2>/dev/null; then
         rm -f "/tmp/campus_baidu_check.$$"
         return 0
     fi
