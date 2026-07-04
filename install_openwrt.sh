@@ -20,7 +20,7 @@ extract_var() {
     var="$1"
     file="$2"
     [ -f "$file" ] || return 0
-    sed -n "s/^${var}=[\"']\\{0,1\\}\\([^\"']*\\)[\"']\\{0,1\\}.*/\\1/p" "$file" | head -n 1
+    sed -n "s/^${var}=[\"']\{0,1\}\([^\"']*\)[\"']\{0,1\}.*/\1/p" "$file" | head -n 1
 }
 
 USERNAME="${USERNAME:-$(extract_var USERNAME "$CONF")}"
@@ -76,11 +76,24 @@ log() {
     tail -n 500 "$LOG_FILE" > "$LOG_FILE.tmp" 2>/dev/null && mv "$LOG_FILE.tmp" "$LOG_FILE"
 }
 
+cleanup_lock() {
+    rm -f "$LOCK_DIR/pid" 2>/dev/null || true
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+}
+
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    if [ -f "$LOCK_DIR/pid" ] && kill -0 "$(cat "$LOCK_DIR/pid" 2>/dev/null)" 2>/dev/null; then
-        log "skip: another auto-login process is running (${1:-manual})"
-        exit 0
-    fi
+    lock_pid=""
+    [ -f "$LOCK_DIR/pid" ] && lock_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+    case "$lock_pid" in
+        ''|*[!0-9]*)
+            ;;
+        *)
+            if kill -0 "$lock_pid" 2>/dev/null; then
+                log "skip: another auto-login process is running pid=$lock_pid (${1:-manual})"
+                exit 0
+            fi
+            ;;
+    esac
     rm -rf "$LOCK_DIR"
     mkdir "$LOCK_DIR" 2>/dev/null || {
         log "skip: cannot create lock (${1:-manual})"
@@ -88,7 +101,24 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     }
 fi
 echo "$$" > "$LOCK_DIR/pid"
-trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
+trap cleanup_lock EXIT INT TERM
+
+urlencode_component() {
+    # Percent-encode every input byte. This is safe for both form bodies and query strings,
+    # and avoids shell/wget bugs when credentials contain &, =, +, %, spaces, or non-ASCII bytes.
+    printf "%s" "$1" |
+        od -An -tx1 -v |
+        tr '[:lower:]' '[:upper:]' |
+        tr ' ' '\n' |
+        sed '/^$/d' |
+        while IFS= read -r hex; do
+            printf '%%%s' "$hex"
+        done
+}
+
+form_pair() {
+    printf '%s=%s' "$1" "$(urlencode_component "$2")"
+}
 
 get_wan_ip() {
     ip -4 route get 8.8.8.8 2>/dev/null |
@@ -154,7 +184,7 @@ check_network() {
 
 first_auth() {
     log "first auth"
-    data="campusCode=${CAMPUS_CODE}&username=${USERNAME}&password=${PASSWORD}&operatorSuffix=${OPERATOR_SUFFIX}"
+    data="$(form_pair campusCode "$CAMPUS_CODE")&$(form_pair username "$USERNAME")&$(form_pair password "$PASSWORD")&$(form_pair operatorSuffix "$OPERATOR_SUFFIX")"
     RESPONSE1="$(http_post_form \
         "http://172.29.35.27:8088/aaa-auth/api/v1/auth" \
         "$data")"
@@ -164,7 +194,7 @@ first_auth() {
 
 second_auth() {
     log "second auth"
-    data="username=${USERNAME}&password=${PASSWORD}&operatorSuffix=${OPERATOR_SUFFIX}"
+    data="$(form_pair username "$USERNAME")&$(form_pair password "$PASSWORD")&$(form_pair operatorSuffix "$OPERATOR_SUFFIX")"
     RESPONSE2="$(http_post_form \
         "http://172.29.35.27:8882/user/check-only" \
         "$data")"
@@ -176,11 +206,14 @@ portal_auth() {
     WAN_IP="$(get_wan_ip)"
     TIMESTAMP="$(($(date +%s) * 1000))"
     UUID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "$TIMESTAMP")"
-    ENCODED_SUFFIX="$(printf "%s" "$OPERATOR_SUFFIX" | sed 's/@/%40/g')"
+    ENCODED_USERID="$(urlencode_component "${USERNAME}${OPERATOR_SUFFIX}")"
+    ENCODED_PASSWORD="$(urlencode_component "$PASSWORD")"
+    ENCODED_WAN_IP="$(urlencode_component "$WAN_IP")"
+    ENCODED_UUID="$(urlencode_component "$UUID")"
 
     log "portal auth: ip=$WAN_IP ts=$TIMESTAMP uuid=$UUID"
     RESPONSE3="$(http_get_body \
-        "http://172.29.35.36:6060/quickauth.do?userid=${USERNAME}${ENCODED_SUFFIX}&passwd=${PASSWORD}&wlanuserip=${WAN_IP}&wlanacname=HD-SuShe-ME60&wlanacIp=172.22.254.253&timestamp=${TIMESTAMP}&uuid=${UUID}")"
+        "http://172.29.35.36:6060/quickauth.do?userid=${ENCODED_USERID}&passwd=${ENCODED_PASSWORD}&wlanuserip=${ENCODED_WAN_IP}&wlanacname=HD-SuShe-ME60&wlanacIp=172.22.254.253&timestamp=${TIMESTAMP}&uuid=${ENCODED_UUID}")"
     log "portal auth response: $RESPONSE3"
     echo "$RESPONSE3" | grep -Eq '"message":"认证成功"|认证成功|已经认证|已在线'
 }
