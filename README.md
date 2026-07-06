@@ -1,28 +1,22 @@
 # HENU-Autologin
 
-河南大学校园网/运营商 portal 自动认证脚本，适用于路由器等设备通过校园网认证链路自动登录。
+河南大学校园网 / 运营商 portal 自动认证脚本。仓库只保留这个 README；下面的代码块就是完整的一键安装命令，直接复制到 OpenWrt / ImmortalWrt 路由器 SSH 里执行。
 
-## 适用边界
+## 一键安装
 
-本项目只处理校园网认证相关接口，例如：
+先改开头四个变量：
 
-- `http://172.29.35.27:8088/aaa-auth/api/v1/auth`
-- `http://172.29.35.27:8882/user/check-only`
-- `http://172.29.35.36:6060/quickauth.do`
+- `USERNAME`：校园网账号 / 学号
+- `PASSWORD`：校园网密码
+- `OPERATOR_SUFFIX`：运营商后缀，移动一般是 `@henuyd`
+- `CAMPUS_CODE`：校区代码，默认值适用于当前已验证链路
 
-本项目不处理图书馆预约系统的 CAS ticket、CASTGC、图书馆 token 或 `/v4/*` 预约接口。图书馆预约需单独适配 `ids.henu.edu.cn` 到 `zwyy.henu.edu.cn` 的 CAS 登录链路。
-
-## 使用方法
-
-在 OpenWrt/ImmortalWrt 路由器 SSH 中粘贴下面整段命令。先把开头的 `USERNAME` 和 `PASSWORD` 改成自己的校园网账号密码；整段脚本不依赖 GitHub raw 或外网下载，适合还没登录校园网的离线路由器。脚本内的认证请求优先使用 ImmortalWrt/OpenWrt 默认可用的 `wget`。
-
-```bash
+```sh
 USERNAME='你的学号'
 PASSWORD='你的密码'
 OPERATOR_SUFFIX='@henuyd'
 CAMPUS_CODE='07cdfd23373b17c6b337251c22b7ea57'
-
-cat > /tmp/install_openwrt.sh <<'HENU_AUTOLOGIN_INSTALLER'
+sh <<'HENU_AUTOLOGIN_INSTALLER'
 #!/bin/sh
 set -eu
 
@@ -45,7 +39,7 @@ extract_var() {
     var="$1"
     file="$2"
     [ -f "$file" ] || return 0
-    sed -n "s/^${var}=[\"']\\{0,1\\}\\([^\"']*\\)[\"']\\{0,1\\}.*/\\1/p" "$file" | head -n 1
+    sed -n "s/^${var}=[\"']\{0,1\}\([^\"']*\)[\"']\{0,1\}.*/\1/p" "$file" | head -n 1
 }
 
 USERNAME="${USERNAME:-$(extract_var USERNAME "$CONF")}"
@@ -62,9 +56,8 @@ OPERATOR_SUFFIX="${OPERATOR_SUFFIX:-@henuyd}"
 CAMPUS_CODE="${CAMPUS_CODE:-07cdfd23373b17c6b337251c22b7ea57}"
 
 if [ -z "${USERNAME:-}" ] || [ -z "${PASSWORD:-}" ]; then
-    echo "ERROR: set USERNAME and PASSWORD first, or keep them in $LOGIN/$CONF."
-    echo "Example:"
-    echo "  USERNAME='2510xxxxxx' PASSWORD='your_password' sh install_openwrt.sh"
+    echo "ERROR: set USERNAME and PASSWORD first."
+    echo "Example: USERNAME='2510xxxxxx' PASSWORD='your_password' sh"
     exit 1
 fi
 
@@ -101,11 +94,24 @@ log() {
     tail -n 500 "$LOG_FILE" > "$LOG_FILE.tmp" 2>/dev/null && mv "$LOG_FILE.tmp" "$LOG_FILE"
 }
 
+cleanup_lock() {
+    rm -f "$LOCK_DIR/pid" 2>/dev/null || true
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+}
+
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    if [ -f "$LOCK_DIR/pid" ] && kill -0 "$(cat "$LOCK_DIR/pid" 2>/dev/null)" 2>/dev/null; then
-        log "skip: another auto-login process is running (${1:-manual})"
-        exit 0
-    fi
+    lock_pid=""
+    [ -f "$LOCK_DIR/pid" ] && lock_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+    case "$lock_pid" in
+        ''|*[!0-9]*)
+            ;;
+        *)
+            if kill -0 "$lock_pid" 2>/dev/null; then
+                log "skip: another auto-login process is running pid=$lock_pid (${1:-manual})"
+                exit 0
+            fi
+            ;;
+    esac
     rm -rf "$LOCK_DIR"
     mkdir "$LOCK_DIR" 2>/dev/null || {
         log "skip: cannot create lock (${1:-manual})"
@@ -113,7 +119,22 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     }
 fi
 echo "$$" > "$LOCK_DIR/pid"
-trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
+trap cleanup_lock EXIT INT TERM
+
+urlencode_component() {
+    printf "%s" "$1" |
+        od -An -tx1 -v |
+        tr '[:lower:]' '[:upper:]' |
+        tr ' ' '\n' |
+        sed '/^$/d' |
+        while IFS= read -r hex; do
+            printf '%%%s' "$hex"
+        done
+}
+
+form_pair() {
+    printf '%s=%s' "$1" "$(urlencode_component "$2")"
+}
 
 get_wan_ip() {
     ip -4 route get 8.8.8.8 2>/dev/null |
@@ -179,7 +200,7 @@ check_network() {
 
 first_auth() {
     log "first auth"
-    data="campusCode=${CAMPUS_CODE}&username=${USERNAME}&password=${PASSWORD}&operatorSuffix=${OPERATOR_SUFFIX}"
+    data="$(form_pair campusCode "$CAMPUS_CODE")&$(form_pair username "$USERNAME")&$(form_pair password "$PASSWORD")&$(form_pair operatorSuffix "$OPERATOR_SUFFIX")"
     RESPONSE1="$(http_post_form \
         "http://172.29.35.27:8088/aaa-auth/api/v1/auth" \
         "$data")"
@@ -189,7 +210,7 @@ first_auth() {
 
 second_auth() {
     log "second auth"
-    data="username=${USERNAME}&password=${PASSWORD}&operatorSuffix=${OPERATOR_SUFFIX}"
+    data="$(form_pair username "$USERNAME")&$(form_pair password "$PASSWORD")&$(form_pair operatorSuffix "$OPERATOR_SUFFIX")"
     RESPONSE2="$(http_post_form \
         "http://172.29.35.27:8882/user/check-only" \
         "$data")"
@@ -201,11 +222,14 @@ portal_auth() {
     WAN_IP="$(get_wan_ip)"
     TIMESTAMP="$(($(date +%s) * 1000))"
     UUID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "$TIMESTAMP")"
-    ENCODED_SUFFIX="$(printf "%s" "$OPERATOR_SUFFIX" | sed 's/@/%40/g')"
+    ENCODED_USERID="$(urlencode_component "${USERNAME}${OPERATOR_SUFFIX}")"
+    ENCODED_PASSWORD="$(urlencode_component "$PASSWORD")"
+    ENCODED_WAN_IP="$(urlencode_component "$WAN_IP")"
+    ENCODED_UUID="$(urlencode_component "$UUID")"
 
     log "portal auth: ip=$WAN_IP ts=$TIMESTAMP uuid=$UUID"
     RESPONSE3="$(http_get_body \
-        "http://172.29.35.36:6060/quickauth.do?userid=${USERNAME}${ENCODED_SUFFIX}&passwd=${PASSWORD}&wlanuserip=${WAN_IP}&wlanacname=HD-SuShe-ME60&wlanacIp=172.22.254.253&timestamp=${TIMESTAMP}&uuid=${UUID}")"
+        "http://172.29.35.36:6060/quickauth.do?userid=${ENCODED_USERID}&passwd=${ENCODED_PASSWORD}&wlanuserip=${ENCODED_WAN_IP}&wlanacname=HD-SuShe-ME60&wlanacIp=172.22.254.253&timestamp=${TIMESTAMP}&uuid=${ENCODED_UUID}")"
     log "portal auth response: $RESPONSE3"
     echo "$RESPONSE3" | grep -Eq '"message":"认证成功"|认证成功|已经认证|已在线'
 }
@@ -298,30 +322,36 @@ echo "Backup: $BACKUP"
 "$LOGIN" install || true
 tail -n 80 /tmp/campus_network.log 2>/dev/null || true
 HENU_AUTOLOGIN_INSTALLER
-
-USERNAME="$USERNAME" PASSWORD="$PASSWORD" OPERATOR_SUFFIX="$OPERATOR_SUFFIX" CAMPUS_CODE="$CAMPUS_CODE" sh /tmp/install_openwrt.sh
 ```
 
-脚本会写入：
+## 安装后生成的文件
 
-- `/etc/campus_network/credentials.conf`
-- `/etc/campus_network/auto_login.sh`
-- `/etc/hotplug.d/iface/99-campus-auto-login`
-- root crontab：每 5 分钟兜底执行一次
-
-关键点：
-
-- `aaa-auth` 和 `check-only` 请求都会带 `operatorSuffix=@henuyd`。
-- 网络检查使用 ImmortalWrt/OpenWrt 默认可用的 `wget` 做 HTTP 204/网页访问判断，不再只用 `ping`，避免 ICMP 放行时误判为已登录。
-- `wwan ifup` 后会自动触发一次登录，开机时还有 cron 兜底。
-
-如果只想手动运行已安装脚本：
-
-```bash
+```text
 /etc/campus_network/auto_login.sh
+/etc/campus_network/credentials.conf
+/etc/hotplug.d/iface/99-campus-auto-login
+/tmp/campus_network.log
 ```
 
-查看日志
-```bash
-cat /tmp/campus_network.log
+## 触发机制
+
+- 开机后延迟运行一次。
+- `wwan` 接口 `ifup` 后延迟运行一次。
+- cron 每 5 分钟检查一次网络状态，未联网时重新认证。
+
+## 手动检查
+
+```sh
+/etc/campus_network/auto_login.sh manual
+tail -n 80 /tmp/campus_network.log
 ```
+
+## 适用边界
+
+本项目只处理校园网认证相关接口，例如：
+
+- `http://172.29.35.27:8088/aaa-auth/api/v1/auth`
+- `http://172.29.35.27:8882/user/check-only`
+- `http://172.29.35.36:6060/quickauth.do`
+
+不处理图书馆预约系统的 CAS ticket、CASTGC、图书馆 token 或 `/v4/*` 预约接口。
